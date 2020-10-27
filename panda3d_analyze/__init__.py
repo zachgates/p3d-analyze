@@ -1,3 +1,4 @@
+#!/usr/local/bin/python3.9
 """
 MIT License
 
@@ -24,134 +25,100 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-from panda3d import core
 
-class StatCollector(core.PStatCollector):
+__all__ = ['PStatContextStack', 'PStatContext', 'analyze']
+
+
+import contextlib
+import functools
+
+from typing import Callable, Mapping, Optional
+
+from panda3d import core as p3d
+
+
+class PStatContextStack(type):
     """
-    Custom wrapper for the PStatCollector
-    """
-
-    def start(self):
-        """
-        Custom wrapper for the collector start
-        """
-
-        if not EngineAnalysis.get_collecting():
-            return
-
-        return core.PStatCollector.start(self)
-
-    def stop(self):
-        """
-        Custom wrapper for the collector stop
-        """
-
-        if not EngineAnalysis.get_collecting():
-            return
-
-        return core.PStatCollector.stop(self)
-
-def AnalysisWrapperDecorator(function):
-    """
-    Wraps a function in a PStatsCollector
+    Manage the PStatClient, and the PStatContext objects in use.
     """
 
-    def do_pstat(*args, **kargs):
-        collector_name = "Debug:%s" % function.__name__
-        pstat = EngineAnalysis.get_collector(collector_name)
+    _trees = p3d.ConfigVariableList('want-pstat-tree')
 
-        pstat.start()
-        returned = function(*args, **kargs)
-        pstat.stop()
-
-        return returned
-    
-    do_pstat.__name__ = function.__name__
-    do_pstat.__dict__ = function.__dict__
-    do_pstat.__doc__ = function.__doc__
-
-    return do_pstat
-
-analyze = AnalysisWrapperDecorator
-
-class EngineAnalysis(object):
-    """
-    Management object for engine analysis and reporting
-    """
-
-    collectors = {}
-    collecting = core.ConfigVariableBool('collect-stats', __debug__).value
-
-    @classmethod
-    def get_client(cls):
-        """
-        Retrieves the global pstats client object
-        """
-
-        return core.PStatClient.get_global_pstats()
-
-    @classmethod
-    def get_collecting(cls):
-        """
-        Retrieves the collecting state
-        """
-
-        return cls.collecting
-
-    @classmethod
-    def set_collecting(cls, state):
-        """
-        Sets the collecting state
-        """
-
-        cls.collecting = state
-
-    @classmethod
-    def connect(cls, hostname='', port=-1):
-        """
-        Connects to a PStats Server instance
-        """
-
-        if core.PStatClient.is_connected():
-            return False
-
-        return core.PStatClient.connect(hostname, port)
-
-    @classmethod
-    def disconnect(cls, hostname, port):
-        """
-        Disconnected from a PStats Server instance
-        """
-
-        if not core.PStatClient.is_connected():
-            return False
-
-        core.PStatClient.disconnect()
-        return True
-
-    @classmethod
-    def add_collector(cls, collector_name, collector_instance):
-        """
-        Adds a new collector instance to the collection
-        """
-
-        if collector_name in cls.collectors:
-            return False
-
-        cls.collectors[collector_name] = collector_instance
-        return True
-
-    @classmethod
-    def get_collector(cls, collector_name):
-        """
-        Retrieves a collector instance. Otherwise returns a new collector
-        if one does not already exist
-        """
-
-        if collector_name in cls.collectors:
-            return cls.collectors[collector_name]
+    def want_tree(self, name: str):
+        """Get the pstat context config variable."""
+        for n in range(self._trees.getNumUniqueValues()):
+            if self._trees.getUniqueValue(n) == name:
+                return True
         else:
-            collector = StatCollector(collector_name)
-            cls.collectors[collector_name] = collector
-        
-        return collector
+            return False
+
+    ###
+
+    @property
+    def client(cls) -> p3d.PStatClient:
+        """Refers to the global pstats client object."""
+        return p3d.PStatClient.get_global_pstats()
+
+    def connect(cls, hostname: str = '', port: int = -1) -> bool:
+        """Connect to a pstats server @hostname:port."""
+        if not cls.client.is_connected():
+            return cls.client.connect(hostname, port)
+        return False
+
+    def disconnect(cls) -> bool:
+        """Disconnect from a pstats server, if connected."""
+        if connected := cls.client.is_connected():
+            cls.client.disconnect()
+        return connected
+
+    ###
+
+    _ctx: Mapping[str, p3d.PStatCollector] = {}
+
+    def get(cls, name: str, tree: str) -> Optional[p3d.PStatCollector]:
+        """Retrieves, or otherwise creates, a PStatCollector instance."""
+        if cls.want_tree():
+            tree = cls._ctx.setdefault(tree, dict())
+            if name in tree:
+                return tree[name]
+            else:
+                return tree.setdefault(name, p3d.PStatCollector(name))
+        else:
+            return None
+
+
+class PStatContextStack(metaclass = PStatContextStack):
+    pass
+
+
+class PStatContext(contextlib.AbstractContextManager):
+    """
+    Context manager wrapper for PStatCollector functions.
+    """
+
+    __slots__ = ('name', 'stat')
+
+    def __init__(self, name: str, tree: str):
+        """Initialize the context with a name and PStatCollector."""
+        if PStatContextStack.want_tree(tree):
+            self.name = f'{tree}:{name}'
+            self.stat = PStatContextStack.get(self.name, tree)
+        else:
+            self.name = self.stat = None
+
+    def __enter__(self):
+        return self.stat
+
+    def __exit__(self, *exc):
+        if self.stat:
+            return self.stat.stop()
+        return False # don't propagate exceptions
+
+
+def analyze(func: Callable):
+    """Decorator for wrapping an arbitrary function in a PStatContext."""
+    @functools.wraps(func)
+    def pstat_context(*args, **kwargs):
+        with PStatContext(func.__name__, 'Debug'):
+            return func(*args, **kwargs)
+    return pstat_context
