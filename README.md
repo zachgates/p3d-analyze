@@ -6,7 +6,7 @@ Panda3D Analyze
 
 
 ## Dependencies
-* Python 3.7
+* Python 3.9
 * Panda3d 1.10.0 or newer
 
 ## License
