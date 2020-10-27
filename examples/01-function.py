@@ -1,3 +1,4 @@
+#!/usr/local/bin/python3.9
 """
 MIT License
 
@@ -24,17 +25,32 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-from direct.showbase.ShowBase import ShowBase
-from panda3d_analyze import analyze, EngineAnalysis
 import time
 
-base = ShowBase()
-EngineAnalysis.connect()
+from panda3d import core as p3d
+
+from direct.showbase.ShowBase import ShowBase
+
+from panda3d_analyze import PStatContextStack, analyze
+
+
+p3d.load_prc_file_data('', 'want-pstat-stack Debug')
+
 
 @analyze
 def sleeper(task):
-    time.sleep(0.1)
-    return task.cont
+    time.sleep(1)
+    return task.again
 
-base.taskMgr.add(sleeper)
-base.run()
+
+def nostats(task):
+    PStatContextStack.disconnect()
+    exit()
+
+
+if __name__ == '__main__':
+    base = ShowBase()
+    PStatContextStack.connect()
+    base.taskMgr.add(sleeper)
+    base.taskMgr.do_method_later(5, nostats, 'exit')
+    base.run()
