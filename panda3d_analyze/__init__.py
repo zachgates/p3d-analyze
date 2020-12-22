@@ -1,6 +1,6 @@
 #!/usr/local/bin/python3.9
 
-__all__ = ['PStatContextStack', 'PStatContext', 'analyze']
+__all__ = ['PStatManager', 'PStatContext', 'analyze']
 
 
 import contextlib
@@ -61,7 +61,7 @@ class _PStatContextStack(type):
             return None
 
 
-class PStatContextStack(metaclass = _PStatContextStack):
+class PStatManager(metaclass = _PStatContextStack):
     pass
 
 
