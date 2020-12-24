@@ -1,98 +1,96 @@
 #!/usr/local/bin/python3.9
 
-__all__ = ['PStatManager', 'PStatContext', 'analyze']
+__all__ = ['PStatTree']
 
 
 import contextlib
 import functools
 
-from typing import Callable, Mapping, Optional
-
 from panda3d import core as p3d
 
 
-class _PStatContextStack(type):
-    """
-    Manage the PStatClient, and the PStatContext objects in use.
-    """
+@contextlib.contextmanager
+def _PStatManager(collector):
+    collector.start()
+    yield
+    collector.stop()
 
-    _trees = p3d.ConfigVariableList('want-pstat-tree')
 
-    def want_tree(self, name: str):
-        """Get the pstat context config variable."""
-        for n in range(self._trees.getNumUniqueValues()):
-            if self._trees.getUniqueValue(n) == name:
-                return True
+class _PStatBranch(dict):
+
+    __slots__ = ('tree',)
+
+    def __init__(self, tree: 'PStatTree'):
+        if isinstance(tree, object):
+            self.tree = tree
         else:
-            return False
+            raise ValueError(f'expected string value for name: {name}')
 
-    ###
+    def __getitem__(self, name: str):
+        stat = (self.tree.name + ':' + name)
+        if name in self:
+            raise KeyError(f'stat already exists: {stat}')
+        else:
+            collector = p3d.PStatCollector(stat)
+            self[name] = collector
+            return collector
+
+    get = __getitem__
+        
+
+def _PStatBranchFactory(name, bases, dct):
+    try:
+        global PStatTree
+        return PStatTree
+    except NameError:
+        try:
+            cls = type(name, bases, dct)
+            return cls(name, (), {})
+        except ConnectionError as exc:
+            raise exc from None
+
+
+class PStatTree(metaclass = _PStatBranchFactory):
+
+    __slots__ = ('name',)
+    _trunk = {}
+
+    def __new__(cls, name, bases, dct):
+        if bases and dct:
+            assert (bases == (PStatTree,))
+            name = dct.pop('__qualname__')
+        else:
+            assert (not bases) and (not dct)
+            name = None
+
+        inst = super().__new__(cls)
+        inst.name = name
+        return inst
 
     @property
-    def client(cls) -> p3d.PStatClient:
-        """Refers to the global pstats client object."""
+    def client(self):
         return p3d.PStatClient.get_global_pstats()
 
-    def connect(cls, hostname: str = '', port: int = -1) -> bool:
-        """Connect to a pstats server @hostname:port."""
-        if not cls.client.is_connected():
-            return cls.client.connect(hostname, port)
-        return False
-
-    def disconnect(cls) -> bool:
-        """Disconnect from a pstats server, if connected."""
-        if connected := cls.client.is_connected():
-            cls.client.disconnect()
-        return connected
-
-    ###
-
-    _ctx: Mapping[str, p3d.PStatCollector] = {}
-
-    def get(cls, name: str, tree: str) -> Optional[p3d.PStatCollector]:
-        """Retrieves, or otherwise creates, a PStatCollector instance."""
-        if cls.want_tree():
-            tree = cls._ctx.setdefault(tree, dict())
-            if name in tree:
-                return tree[name]
-            else:
-                return tree.setdefault(name, p3d.PStatCollector(name))
+    def __init__(self, name, bases, dct):
+        if self.name is None:
+            host = p3d.ConfigVariableString('pstats-host', 'localhost').value
+            port = p3d.ConfigVariableInt('pstats-port', 5185).value
+            if not self.client.connect(host, port):
+                if p3d.ConfigVariableBool('pstats-required', False).value:
+                    raise ConnectionError(f'failed to connect: {host}:{port}')
         else:
-            return None
+            self._trunk.setdefault(self.name, _PStatBranch(self))
 
-
-class PStatManager(metaclass = _PStatContextStack):
-    pass
-
-
-class PStatContext(contextlib.AbstractContextManager):
-    """
-    Context manager wrapper for PStatCollector functions.
-    """
-
-    __slots__ = ('name', 'stat')
-
-    def __init__(self, name: str, tree: str):
-        """Initialize the context with a name and PStatCollector."""
-        if PStatContextStack.want_tree(tree):
-            self.name = f'{tree}:{name}'
-            self.stat = PStatContextStack.get(self.name, tree)
+    def __call__(self, str_or_func):
+        if (self is PStatTree):
+            assert isinstance(str_or_func, str)
+            class _(PStatTree):
+                __qualname__ = str_or_func
+            return _
         else:
-            self.name = self.stat = None
-
-    def __enter__(self):
-        return self.stat
-
-    def __exit__(self, *exc):
-        if self.stat:
-            return self.stat.stop()
-        return False # don't propagate exceptions
-
-
-def analyze(func: Callable):
-    """Decorator for wrapping an arbitrary function in a PStatContext."""
-    @functools.wraps(func)
-    def pstat_context(*args, **kwargs):
-        with PStatContext(func.__name__, 'Debug'):
-            return func(*args, **kwargs)
-    return pstat_context
+            collector = PStatTree._trunk[self.name][str_or_func.__name__]
+            @functools.wraps(str_or_func)
+            def pstat_func(*args, **kwargs):
+                with _PStatManager(collector):
+                    return str_or_func(*args, **kwargs)
+            return pstat_func
